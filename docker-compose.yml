@@ -1,0 +1,28 @@
+services:
+  tgmesh-bridge:
+    image: ghcr.io/dmitriylyalyuev/tgmesh-bridge:latest
+    container_name: tgmesh-bridge
+    restart: unless-stopped
+    environment:
+      # Telegram (required)
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN is required}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:?TELEGRAM_CHAT_ID is required}
+
+      # Meshtastic (TCP)
+      MESHTASTIC_HOST: ${MESHTASTIC_HOST:?MESHTASTIC_HOST is required}
+      MESHTASTIC_PORT: ${MESHTASTIC_PORT:-4403}
+
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_LEVEL_TELEGRAM: ${LOG_LEVEL_TELEGRAM:-warn}
+      LOG_LEVEL_HTTPX: ${LOG_LEVEL_HTTPX:-warn}
+    volumes:
+      - tgmesh-bridge-data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  tgmesh-bridge-data:

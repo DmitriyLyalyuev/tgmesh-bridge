@@ -1,0 +1,4 @@
+meshtastic
+python-telegram-bot
+py-staticmaps
+Pillow

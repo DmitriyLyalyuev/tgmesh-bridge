@@ -1,0 +1,17 @@
+strictness: medium
+test-warnings: false
+doc-warnings: false
+
+ignore-paths:
+  - config
+
+pycodestyle:
+  disable:
+    - N815
+
+pep8-naming:
+  disable:
+    - N815
+
+pylint:
+  run: false
