@@ -9,6 +9,7 @@ from typing import Any, Optional
 import httpx
 import staticmaps
 from telegram import Bot, BotCommand, Update, ReactionTypeEmoji
+from telegram.error import NetworkError, TimedOut
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from config_manager import ConfigManager, get_logger
 from storage import Storage
@@ -118,13 +119,34 @@ class TelegramInterface:
         except Exception as e:
             self.logger.warning(f"Failed to set reaction on {message_id}: {e}")
 
+    _NETWORK_RETRY_DELAYS = (1.0, 2.0, 4.0)
+
+    async def _with_retry(self, label: str, fn):
+        """Run a coroutine factory with retries on network/timeout errors."""
+        last_exc: Exception | None = None
+        for attempt, delay in enumerate((0.0,) + self._NETWORK_RETRY_DELAYS):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                return await fn()
+            except (TimedOut, NetworkError) as e:
+                last_exc = e
+                self.logger.warning(
+                    f"{label} failed (attempt {attempt + 1}): {e}; retrying"
+                )
+        assert last_exc is not None
+        raise last_exc
+
     async def send_message(self, text: str, reply_to_message_id: int | None = None) -> int:
         """Send a message to the configured chat. Returns the sent message_id."""
-        msg = await self.bot.send_message(
-            chat_id=self.chat_id,
-            text=text,
-            reply_to_message_id=reply_to_message_id,
-            allow_sending_without_reply=True,
+        msg = await self._with_retry(
+            "send_message",
+            lambda: self.bot.send_message(
+                chat_id=self.chat_id,
+                text=text,
+                reply_to_message_id=reply_to_message_id,
+                allow_sending_without_reply=True,
+            ),
         )
         return msg.message_id
 
