@@ -401,27 +401,66 @@ class TelegramInterface:
             await update.message.reply_text("Meshtastic disconnected")
             return
 
-        hop_limit = 7
+        await update.message.reply_text(f"Tracing route to {node_id}…")
         try:
-            await asyncio.to_thread(
-                self.meshtastic.interface.sendTraceRoute, node_id, hop_limit, 0
-            )
-            await update.message.reply_text(
-                f"Traceroute to {node_id} sent. Waiting for response..."
-            )
-            try:
-                result = await asyncio.to_thread(
-                    self.meshtastic.interface.waitForTraceRoute, 2
-                )
-            except Exception as e:
-                await update.message.reply_text(f"Traceroute timed out: {e}")
-                return
-            await update.message.reply_text(
-                f"Traceroute result:\n```\n{result}\n```", parse_mode='Markdown'
-            )
+            info = await self.meshtastic.send_traceroute(node_id, hop_limit=7, timeout=45.0)
+        except TimeoutError as e:
+            await update.message.reply_text(f"⌛ {e}")
+            return
         except Exception as e:
             self.logger.error(f"Trace failed: {e}", exc_info=True)
             await update.message.reply_text(f"Trace failed: {e}")
+            return
+
+        lines = self._format_traceroute(info)
+        await update.message.reply_text("\n".join(lines))
+
+    def _format_traceroute(self, info: dict[str, Any]) -> list[str]:
+        def name_for(node_id_str: str) -> str:
+            n = self.meshtastic.lookup_name(node_id_str) if self.meshtastic else None
+            if n:
+                return f"{n[1]} ({node_id_str})"
+            n = self.storage.lookup_node(node_id_str)
+            if n:
+                return f"{n[1]} ({node_id_str})"
+            return node_id_str
+
+        def hop(node_num: int, snr_q: int | None) -> str:
+            label = name_for(self.meshtastic.node_num_to_id(node_num))
+            if snr_q is None:
+                return label
+            return f"{label} ({snr_q / 4:.1f}dB)"
+
+        snr_towards = info.get('snr_towards') or []
+        route = info.get('route') or []
+        snr_back = info.get('snr_back') or []
+        route_back = info.get('route_back') or []
+        src = info.get('from')
+        dst = info.get('to')
+
+        out: list[str] = []
+        if src is not None:
+            # Forward direction: us → … → target. Final entry of snr_towards is target's SNR.
+            forward = [name_for(self.meshtastic.node_num_to_id(dst))] if dst else []
+            for idx, n in enumerate(route):
+                snr = snr_towards[idx] if idx < len(snr_towards) else None
+                forward.append(hop(n, snr))
+            tail_snr = snr_towards[-1] if snr_towards else None
+            forward.append(hop(src, tail_snr))
+            out.append("Route towards destination:")
+            out.append("  " + " → ".join(forward))
+        if route_back or snr_back:
+            back = [name_for(self.meshtastic.node_num_to_id(src))] if src else []
+            for idx, n in enumerate(route_back):
+                snr = snr_back[idx] if idx < len(snr_back) else None
+                back.append(hop(n, snr))
+            tail_snr = snr_back[-1] if snr_back else None
+            back.append(hop(dst, tail_snr))
+            out.append("Route back to us:")
+            out.append("  " + " → ".join(back))
+        if not out:
+            out.append("Empty traceroute response.")
+        return out
 
     async def _on_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.effective_chat is None or update.message is None:

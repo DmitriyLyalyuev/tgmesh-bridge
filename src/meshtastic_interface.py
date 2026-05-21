@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any, Optional
-from meshtastic import tcp_interface
+from meshtastic import tcp_interface, mesh_pb2, portnums_pb2
 from meshtastic.tcp_interface import TCPInterface
 from pubsub import pub
 from config_manager import ConfigManager, get_logger
@@ -227,3 +227,59 @@ class MeshtasticInterface:
         if not node:
             return None
         return node.get('user')
+
+    def node_num_to_id(self, num: int) -> str:
+        """Convert a 32-bit node num to '!xxxxxxxx' string."""
+        return f"!{num:08x}"
+
+    async def send_traceroute(
+        self,
+        dest_id: str,
+        hop_limit: int = 7,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        """Send a TRACEROUTE_APP request and await the response.
+
+        Returns a dict with route info or raises TimeoutError.
+        """
+        if not self._connected or self.interface is None or self._loop is None:
+            raise RuntimeError("Meshtastic disconnected")
+
+        future: asyncio.Future = self._loop.create_future()
+
+        def on_response(packet: dict[str, Any]) -> None:
+            try:
+                payload = packet.get('decoded', {}).get('payload', b'')
+                rd = mesh_pb2.RouteDiscovery()
+                if isinstance(payload, (bytes, bytearray)):
+                    rd.ParseFromString(bytes(payload))
+                info = {
+                    'from': packet.get('from'),
+                    'to': packet.get('to'),
+                    'route': list(rd.route),
+                    'snr_towards': list(rd.snr_towards),
+                    'route_back': list(rd.route_back),
+                    'snr_back': list(rd.snr_back),
+                    'hop_start': packet.get('hopStart'),
+                }
+                if not future.done():
+                    self._loop.call_soon_threadsafe(future.set_result, info)
+            except Exception as e:
+                if not future.done():
+                    self._loop.call_soon_threadsafe(future.set_exception, e)
+
+        r = mesh_pb2.RouteDiscovery()
+        await asyncio.to_thread(
+            self.interface.sendData,
+            r,
+            destinationId=dest_id,
+            portNum=portnums_pb2.PortNum.TRACEROUTE_APP,
+            wantResponse=True,
+            onResponse=on_response,
+            channelIndex=0,
+            hopLimit=hop_limit,
+        )
+        try:
+            return await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.TimeoutError:
+            raise TimeoutError(f"Traceroute to {dest_id} timed out after {int(timeout)}s")
