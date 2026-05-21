@@ -8,7 +8,7 @@ import urllib.parse
 from typing import Any, Optional
 import httpx
 import staticmaps
-from telegram import Bot, Update, ReactionTypeEmoji
+from telegram import Bot, BotCommand, Update, ReactionTypeEmoji
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from config_manager import ConfigManager, get_logger
 from storage import Storage
@@ -54,6 +54,17 @@ class TelegramInterface:
         app.add_handler(CommandHandler('trace', self._cmd_trace))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))
 
+    _BOT_COMMANDS = [
+        BotCommand("help", "Show available commands"),
+        BotCommand("weather", "Aggregate env telemetry (last 1h)"),
+        BotCommand("map", "Static map of nodes with positions"),
+        BotCommand("nodes", "List known mesh nodes"),
+        BotCommand("send", "DM a node: /send <id|shortName> <text>"),
+        BotCommand("dm", "Alias for /send"),
+        BotCommand("trace", "Meshtastic traceroute: /trace <id|shortName>"),
+        BotCommand("health", "Bridge and mesh health"),
+    ]
+
     async def start(self) -> None:
         """Initialize application and run polling until stop event."""
         if not self.application:
@@ -61,6 +72,11 @@ class TelegramInterface:
         self.logger.info("Starting telegram polling...")
         await self.application.initialize()
         await self.application.start()
+        try:
+            await self.bot.set_my_commands(self._BOT_COMMANDS)
+            self.logger.info("Registered bot commands menu.")
+        except Exception as e:
+            self.logger.warning(f"Failed to set bot commands: {e}")
         await self.application.updater.start_polling(drop_pending_updates=True)
         self._is_polling = True
         await self._stop_event.wait()
