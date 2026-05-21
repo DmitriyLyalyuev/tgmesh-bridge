@@ -36,7 +36,15 @@ class TelegramInterface:
         self.chat_id = self.config.get('telegram.chat_id')
         if not self.chat_id:
             raise ValueError("Telegram chat_id not found in configuration")
-        self.application = Application.builder().token(token).build()
+        self.application = (
+            Application.builder()
+            .token(token)
+            .connect_timeout(20.0)
+            .read_timeout(20.0)
+            .write_timeout(20.0)
+            .pool_timeout(20.0)
+            .build()
+        )
         self.bot = self.application.bot
         self._register_handlers()
         self.logger.info("Telegram interface set up successfully.")
