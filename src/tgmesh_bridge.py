@@ -1,4 +1,5 @@
 import asyncio
+import time
 from pathlib import Path
 from typing import Optional
 from meshtastic_interface import MeshtasticInterface
@@ -44,6 +45,49 @@ class TgmeshBridge:
             self.storage.close()
         self.logger.info("TgmeshBridge shutdown complete.")
 
+    _TELEGRAM_RESTART_DELAYS: tuple[int, ...] = (1, 2, 4, 8, 16, 32, 64, 128, 256, 300)
+    _TELEGRAM_RESTART_RESET_AFTER_SECONDS: float = 60.0
+
+    async def _supervise_telegram(self) -> None:
+        """Run telegram.start() forever, restarting on unexpected exceptions.
+
+        NetworkError/TimedOut are already handled inside TelegramInterface;
+        anything that escapes here is a programming bug or a pathological
+        condition we still want the bridge to survive.
+
+        If start() ran longer than the reset threshold before crashing, the
+        backoff counter resets so independent failures hours apart don't
+        drift up to the 300s cap.
+        """
+        attempt = 0
+        while True:
+            started_at = time.monotonic()
+            try:
+                await self.telegram.start()
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                ran_for = time.monotonic() - started_at
+                if ran_for >= self._TELEGRAM_RESTART_RESET_AFTER_SECONDS:
+                    attempt = 0
+                delay = self._TELEGRAM_RESTART_DELAYS[
+                    min(attempt, len(self._TELEGRAM_RESTART_DELAYS) - 1)
+                ]
+                self.logger.error(
+                    f"Telegram task crashed after {ran_for:.1f}s "
+                    f"(attempt {attempt + 1}): {e}; restarting in {delay}s",
+                    exc_info=True,
+                )
+                try:
+                    await self.telegram.restart_cleanup()
+                except Exception as cleanup_err:
+                    self.logger.warning(
+                        f"restart_cleanup raised: {cleanup_err}"
+                    )
+                await asyncio.sleep(delay)
+                attempt += 1
+
     async def _health_loop(self) -> None:
         path = Path('/tmp/tgmesh_bridge.ready')
         while True:
@@ -66,7 +110,7 @@ class TgmeshBridge:
         try:
             await asyncio.gather(
                 self.processor.run(),
-                self.telegram.start(),
+                self._supervise_telegram(),
                 self._health_loop(),
             )
         except asyncio.CancelledError:
