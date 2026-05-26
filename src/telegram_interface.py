@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import io
 import json
 import time
@@ -13,6 +14,28 @@ from telegram.error import NetworkError, TimedOut
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from config_manager import ConfigManager, get_logger
 from storage import Storage
+
+# Backoff schedule (seconds). The last entry is reused indefinitely.
+_RECONNECT_DELAYS: tuple[int, ...] = (1, 2, 4, 8, 16, 32, 64, 128, 256, 300)
+
+
+async def _resilient_call(label: str, fn):
+    """Run an async callable forever, retrying NetworkError/TimedOut with backoff.
+
+    Other exceptions propagate immediately.
+    """
+    logger = get_logger(__name__)
+    attempt = 0
+    while True:
+        try:
+            return await fn()
+        except (NetworkError, TimedOut) as e:
+            delay = _RECONNECT_DELAYS[min(attempt, len(_RECONNECT_DELAYS) - 1)]
+            logger.warning(
+                f"{label} failed (attempt {attempt + 1}): {e}; retrying in {delay}s"
+            )
+            await asyncio.sleep(delay)
+            attempt += 1
 
 
 class TelegramInterface:
@@ -62,6 +85,18 @@ class TelegramInterface:
         app.add_handler(CommandHandler('health', self._cmd_health))
         app.add_handler(CommandHandler('trace', self._cmd_trace))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))
+        app.add_error_handler(self._on_error)
+
+    async def _on_error(self, update, context) -> None:
+        """Catch-all handler for exceptions raised in polling/handlers.
+
+        Network errors are expected during outages; log and swallow.
+        """
+        err = getattr(context, "error", None)
+        if isinstance(err, (NetworkError, TimedOut)):
+            self.logger.warning(f"Telegram network error (swallowed): {err}")
+            return
+        self.logger.error(f"Unhandled telegram error: {err}", exc_info=err)
 
     _BOT_COMMANDS = [
         BotCommand("help", "Show available commands"),
@@ -75,18 +110,31 @@ class TelegramInterface:
     ]
 
     async def start(self) -> None:
-        """Initialize application and run polling until stop event."""
+        """Initialize application and run polling until stop event.
+
+        The initialize/start/start_polling sequence is wrapped in an infinite
+        backoff loop: transient network failures (DNS, timeouts) on startup or
+        early polling no longer crash the bridge.
+        """
         if not self.application:
             raise RuntimeError("TelegramInterface not set up")
         self.logger.info("Starting telegram polling...")
-        await self.application.initialize()
+
+        await _resilient_call("application.initialize", self.application.initialize)
         await self.application.start()
         try:
-            await self.bot.set_my_commands(self._BOT_COMMANDS)
+            await _resilient_call(
+                "set_my_commands",
+                lambda: self.bot.set_my_commands(self._BOT_COMMANDS),
+            )
             self.logger.info("Registered bot commands menu.")
         except Exception as e:
             self.logger.warning(f"Failed to set bot commands: {e}")
-        await self.application.updater.start_polling(drop_pending_updates=True)
+
+        await _resilient_call(
+            "updater.start_polling",
+            lambda: self.application.updater.start_polling(drop_pending_updates=True),
+        )
         self._is_polling = True
         await self._stop_event.wait()
         await self._stop_polling()
@@ -107,6 +155,25 @@ class TelegramInterface:
             except Exception as e:
                 self.logger.error(f"Error during telegram shutdown: {e}", exc_info=True)
         self.logger.info("Telegram polling stopped.")
+
+    async def restart_cleanup(self) -> None:
+        """Best-effort teardown of PTB Application state for a restart.
+
+        Distinct from shutdown(): does NOT set _stop_event, so a fresh start()
+        can run afterwards. Used by the bridge supervisor.
+        """
+        self._is_polling = False
+        if self.application is None:
+            return
+        for label, coro_fn in (
+            ("updater.stop", self.application.updater.stop),
+            ("application.stop", self.application.stop),
+            ("application.shutdown", self.application.shutdown),
+        ):
+            try:
+                await coro_fn()
+            except Exception as e:
+                self.logger.warning(f"restart_cleanup: {label} failed: {e}")
 
     async def set_status(self, message_id: int, emoji: str) -> None:
         """Set a single emoji reaction on a message. Swallows errors."""
@@ -345,12 +412,12 @@ class TelegramInterface:
                 age_str = f"{age // 3600}h"
             else:
                 age_str = f"{age // 86400}d"
-            short = short_name or '—'
-            long_ = long_name or ''
-            lines.append(f"`{node_id}`  {short}  {long_}  ({age_str} ago)")
+            short = html.escape(short_name or '—')
+            long_ = html.escape(long_name or '')
+            lines.append(f"<code>{html.escape(node_id)}</code>  {short}  {long_}  ({age_str} ago)")
         if len(rows) > 50:
             lines.append(f"... и ещё {len(rows) - 50}")
-        await update.message.reply_text("\n".join(lines), parse_mode='Markdown')
+        await update.message.reply_text("\n".join(lines), parse_mode='HTML')
 
     @staticmethod
     def _format_uptime(seconds: int) -> str:
