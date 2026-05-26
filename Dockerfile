@@ -31,6 +31,6 @@ VOLUME /data
 USER tgmesh-bridge
 
 HEALTHCHECK --interval=60s --timeout=5s --start-period=60s --retries=3 \
-    CMD find /tmp/tgmesh-bridge.ready -mmin -2 | grep -q . || exit 1
+    CMD find /tmp/tgmesh_bridge.ready -mmin -2 | grep -q . || exit 1
 
 CMD ["python", "-u", "src/tgmesh_bridge.py"]
